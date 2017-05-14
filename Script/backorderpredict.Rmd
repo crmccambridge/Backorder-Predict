@@ -1,0 +1,689 @@
+---
+title: "Final Project"
+author: "Connor McCambridge"
+date: "4/15/2017"
+output: html_document
+---
+#Purpose
+
+The question that was purposed on Kaggle with the dataset is as follows: Part backorders is a common supply chain problem. Working to identify parts at risk of backorder before the event occurs so the business has time to react.
+
+So for my final project I wanted to look into how good of a job I could do, using the techniques I learned in class to try to predcit the back order. The following is the process I used
+
+#Data
+
+Before anything could happen I first load the data and prepare the environment.
+
+##Loading Data
+
+
+```{r load data}
+backorder<-read.csv("~/Documents/BIA 6301 Data Mining/Final Project/Kaggle_Training_Dataset.csv")
+```
+
+##Load Packages
+
+```{r load packages, message=FALSE, warning=FALSE}
+library(lattice)
+library(ggplot2)
+library(caret)
+library(plyr)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(mlbench)
+library(adabag)
+library(grid)
+library(partykit)
+#library(rattle)
+library(DMwR)
+library(purrr)
+library(pROC)
+library(survival)
+library(gbm)
+library(dplyr)
+library(klaR)
+library(class)
+#library(gRain)
+options(scipen=999)
+```
+
+##Preping and Examining Data
+
+Some observations for preformance had -99 for both 6 and 12 months. This was never explained on with the details of the set, so all observations with them were removed.
+
+```{r prep and examine}
+backorder<-backorder[!(backorder$perf_6_month_avg==-99),]
+backorder<-backorder[!(backorder$perf_12_month_avg==-99),]
+#names(backorder)
+str(backorder)
+summary(backorder)
+```
+
+##Randomizing the Order then Seperating Out Training and Testing Amount
+
+The 82,330 amount was determined by knowing I wanted a test size with 99 confidence level, which is 16,465 observations. I also knew I wanted to use a .80/.20 split for my training and testing data. The orginal 16,465 was taken then multiplied by 5 to give the final amount that was going to be used.
+
+```{r random split}
+set.seed(123)
+bo_rand <- backorder[order(runif(1562992)), ] 
+bo_caret <- bo_rand[1:82330, ]
+
+```
+
+
+##Spliting Data into Train and Test Sets
+
+Using data partition to split the sampled data into a training and testing set.
+
+```{r train and test}
+set.seed(123)
+trainIndex <- createDataPartition(bo_caret$went_on_backorder, p = .8,list = FALSE,times = 1)
+bo_caret_train <- bo_caret[trainIndex,]
+bo_caret_test <- bo_caret[-trainIndex,]
+```
+
+##Examing the Backorder Rates
+
+After the data is split I want to be sure that ratio for item being back ordered is similar throughout all the datasets.
+
+```{r backorder rates}
+prop.table(table(backorder$went_on_backorder))
+prop.table(table(bo_caret_train$went_on_backorder))
+prop.table(table(bo_caret_test$went_on_backorder))
+```
+
+From the results given, it seems like the ratio of back ordered items is very close to the original, and I feel comfortable moving forward with this method.
+
+##The Test ROC Function
+
+This is a custom function that is used to examine the ROC throughout.
+
+```{r test ROC function}
+test_roc <- function(model, data) {
+  
+  roc(data$went_on_backorder,
+      predict(model, data, type = "prob")[, "Yes"])
+
+}
+```
+
+#Decision Tree
+
+I wanted to start with a decision tree because not only does it give a binary response, but it is easily adjusted, can be cross validated, and if a good result is found, the decision tree could be used to help solve the promblem with items being backordered.
+
+##Rpart Decision Tree with Sampling
+
+I decided to run all my models in the caret package because it was easy to using weighting and samplying methods to improve the results, and then compare those results. For all the models a orginal model was ran, then followed by a weighted model, a up sampling model, a down sampling model, and finally a SMOTE sampling model. Also all models were 10 fold cross validated. 
+
+```{r decision tree modeling, message=FALSE, warning=FALSE}
+ctrl <- trainControl(method = "cv",
+                     number = 10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+
+set.seed(123)
+
+orig_rpart <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rpart", metric = "ROC", trControl = ctrl)
+
+model_weights <- ifelse(bo_caret_train$went_on_backorder == "No",
+                        (1/table(bo_caret_train$went_on_backorder)[1]) * 0.5,
+                        (1/table(bo_caret_train$went_on_backorder)[2]) * 0.5)
+
+ctrl$seeds <- orig_rpart$control$seeds
+
+weighted_rpart <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rpart",weights = model_weights, metric = "ROC", trControl = ctrl)
+
+ctrl$sampling <- "down"
+
+down_rpart <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rpart", metric = "ROC", trControl = ctrl)
+
+ctrl$sampling <- "up"
+
+up_rpart <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rpart", metric = "ROC", trControl = ctrl)
+
+ctrl$sampling <- "smote"
+
+smote_rpart <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rpart", metric = "ROC", trControl = ctrl)
+```
+
+##Returned Rpart ROC
+
+After all the samples were ran, then the area under the ROC curve were compared to see which had the highest area, those being the better fit for the model.
+
+```{r decision tree roc}
+# Examine results for test set
+
+model_rpart <- list(original = orig_rpart,
+                   weighted = weighted_rpart,
+                   down = down_rpart,
+                   up = up_rpart,
+                   SMOTE = smote_rpart)
+
+model_rpart_roc <- model_rpart %>%
+  map(test_roc, data = bo_caret_test)
+
+model_rpart_roc %>%
+  map(auc)
+```
+
+From the results given, it seems like the the down sampling model produced the best results in terms of AUC.
+
+##Rpart ROC Plot
+
+And the ROC for each model was plotted together for visual comparision.
+
+```{r decision tree ROC plot}
+results_rpart_roc <- list(NA)
+num_mod <- 1
+
+for(the_roc in model_rpart_roc){
+  
+  results_rpart_roc[[num_mod]] <- 
+    data_frame(tpr = the_roc$sensitivities,
+               fpr = 1 - the_roc$specificities,
+               model = names(model_rpart)[num_mod])
+  
+  num_mod <- num_mod + 1
+  
+}
+
+results_df_rpart_roc <- bind_rows(results_rpart_roc)
+
+custom_col <- c("#000000", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+roc_plot_rpart <- ggplot(aes(x = fpr,  y = tpr, group = model), data = results_df_rpart_roc) +
+  geom_line(aes(color = model), size = 1) +
+  scale_color_manual(values = custom_col) +
+  geom_abline(intercept = 0, slope = 1, color = "gray", size = 1) +
+  theme_bw(base_size = 18) + 
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("Rpart ROC Results", subtitle = NULL)
+
+roc_plot_rpart
+
+```
+
+This is a good visual showing how close each model was, and being that the results are so close and the dowm sampling has the best AUC, the down sampling model for the decision tree is still the model I pick for comparision moving forward.
+
+##Sample Down Rpart Decision Tree
+
+Once it was determined that the down sampling decision tree had the best AUC, the decision tree was then plotted.
+
+```{r decision tree plot}
+rpart.plot(down_rpart$finalModel, type=1, extra=101)
+```
+
+##Sample Down Rpart Confusion Matrix
+
+The confusion matrix for the Decision Tree model used
+
+```{r decision tree confusion martix, echo=FALSE}
+bo_actual_rpart <- bo_caret_test$went_on_backorder 
+bo_predicted_rpart <- predict(down_rpart, bo_caret_test, type="raw") 
+bo_results_rpart<- confusionMatrix(bo_predicted_rpart, bo_actual_rpart, positive="Yes") 
+print(bo_results_rpart)
+```
+
+##Prune Tree
+####Class Recommendation
+
+From the notes I recieved from my presentation in class I decided to take a look at how the prune tree would compare to the full tree that was presented earlier.
+
+```{r prune tree}
+down_rpart_prune<-prune(down_rpart$finalModel, cp=0.10 )
+
+
+rpart.plot(down_rpart_prune, type=1, extra=101)
+```
+
+The prune tree is much easier to understand than the originally created tree. It gives a clear actionable item of what should be done immeditely to help to prevent backorders. And what that action is, is that in the next 3 monthes if the item is forecasted to sell any, then there should at least be 24 in national inventory. Even though this seems like a very simple and common sense rule, I think it is a great place to start when looking to stop backorders from happening.
+
+```{r prune decision tree confusion martix, echo=FALSE}
+#bo_actual_rpart2 <- bo_caret_test$went_on_backorder
+#bo_predicted_rpart2 <- predict(down_rpart2, data = bo_caret_test) 
+#bo_predicted_rpart2 <- predict(down_rpart_prune, bo_caret_test, type="class") 
+#bo_results_rpart2<- confusionMatrix(bo_predicted_rpart2, bo_actual_rpart2, positive="Yes") 
+#print(bo_results_rpart2)
+```
+
+#Random Forest
+
+Now that a Decision Tree model has been created and examined, I want to take a look at a random forest of decision trees to see if that improves upon the results that were found.
+
+##Random Forest with Sampling
+
+Like in the decision tree modeling, there were five different models created, all of them were cross validated. And with the Random Forest 500 trees were created for each model and 3 different mtrys were examined for each model to see what yeilded the best results.
+
+```{r random forest models, message=FALSE, warning=FALSE}
+ctrl <- trainControl(method = "cv",
+                     number = 10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+
+newGrid = expand.grid(mtry = c(2,11,21))
+
+set.seed(123)
+
+orig_rf <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rf", metric = "ROC", trControl = ctrl,tuneGrid = newGrid, ntree=500)
+
+model_weights <- ifelse(bo_caret_train$went_on_backorder == "No",
+                        (1/table(bo_caret_train$went_on_backorder)[1]) * 0.5,
+                        (1/table(bo_caret_train$went_on_backorder)[2]) * 0.5)
+
+ctrl$seeds <- orig_rf$control$seeds
+
+weighted_rf <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rf", metric = "ROC", weights = model_weights, trControl = ctrl,tuneGrid = newGrid, ntree=500)
+
+ctrl$sampling <- "down"
+
+down_rf <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rf", metric = "ROC", trControl = ctrl,tuneGrid = newGrid, ntree=500)
+
+ctrl$sampling <- "up"
+
+up_rf <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rf", metric = "ROC", trControl = ctrl,tuneGrid = newGrid, ntree=500)
+
+ctrl$sampling <- "smote"
+
+smote_rf <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train, method = "rf", metric = "ROC", trControl = ctrl,tuneGrid = newGrid, ntree=500)
+```
+
+##Returned Random Forest Models ROC
+
+The area under the curve for all five different Random Forest Models.
+
+```{r random forest ROC}
+# Examine results for test set
+
+model_rf <- list(original = orig_rf,
+                   weighted = weighted_rf,
+                   down = down_rf,
+                   up = up_rf,
+                   SMOTE = smote_rf)
+
+model_rf_roc <- model_rf %>%
+  map(test_roc, data = bo_caret_test)
+
+model_rf_roc %>%
+  map(auc)
+```
+
+Again it appears the down sampling model did the best job returning the best AUC between all the models that were created.
+
+##Random Forest ROC Plot
+
+The plotted ROC for the five Random Forest Models.
+
+```{r random forest ROC plot}
+results_rf_roc <- list(NA)
+num_mod <- 1
+
+for(the_roc in model_rf_roc){
+  
+  results_rf_roc[[num_mod]] <- 
+    data_frame(tpr = the_roc$sensitivities,
+               fpr = 1 - the_roc$specificities,
+               model = names(model_rf)[num_mod])
+  
+  num_mod <- num_mod + 1
+  
+}
+
+results_df_rf_roc <- bind_rows(results_rf_roc)
+
+custom_col <- c("#000000", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+roc_plot_rf <- ggplot(aes(x = fpr,  y = tpr, group = model), data = results_df_rf_roc) +
+  geom_line(aes(color = model), size = 1) +
+  scale_color_manual(values = custom_col) +
+  geom_abline(intercept = 0, slope = 1, color = "gray", size = 1) +
+  theme_bw(base_size = 18) + 
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("Random Forest ROC Results", subtitle = NULL)
+
+roc_plot_rf
+
+```
+
+Again the results are all very close together but I would still recommend using the down sampling model in the case. It seems to do the best according to the ROC curve.
+
+##Sample Down Random Forest Selected Predictors
+
+Since the sample down model yeilded the best results again, I decided to examine which number of randomly selected predictors was used that gove the best ROC results.
+
+```{r random forest plot}
+plot(down_rf)
+```
+
+From this plot it is very plan to see that 11 randomly selected predictors does the best job returning the best ROC curve. And since 11 was the best number, that is the number the model automaticly picked when creating it's model.
+
+##Sample Down Random Forest Important Variables
+
+A important variable plot was made to see which variables had the biggest impact on the random forest model.
+
+```{r random forest important variables}
+drf <- down_rf$finalModel
+
+varImpPlot(drf)
+```
+
+From the random forest model produced, it seems like the most important variables are the national inventory, all the sales forcast, all the source preformance, and the in transit amount.
+
+##Random Forest Confusion Matrix
+
+The confusion matrix for the down sampling random forest model selected.
+
+```{r random forest confusion martix}
+bo_actual_rf <- bo_caret_test$went_on_backorder 
+bo_predicted_rf <- predict(down_rf, bo_caret_test, type="raw") 
+bo_results_rf<- confusionMatrix(bo_predicted_rf, bo_actual_rf, positive="Yes") 
+print(bo_results_rf)
+```
+
+#Logistic Regression
+
+Now that both decision tree and random forest modeling was used, I wanted to see how a regression model stood up to the results that have already been found. And since the outcome that is being sought after is a binary result, the best way to use a regression model is with a logistic regression.
+
+##Logistic Models with Sampling
+
+Just like before, the five different models were produced and 10-fold cross validated.
+
+```{r logistic models, message=FALSE, warning=FALSE}
+ctrl <- trainControl(method = "cv",
+                     number = 10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+
+set.seed(123)
+
+orig_glm <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop,data=bo_caret_train, method = "glm", metric = "ROC", trControl = ctrl)
+
+model_weights <- ifelse(bo_caret_train$went_on_backorder == "No",
+                        (1/table(bo_caret_train$went_on_backorder)[1]) * 0.5,
+                        (1/table(bo_caret_train$went_on_backorder)[2]) * 0.5)
+
+ctrl$seeds <- orig_glm$control$seeds
+ 
+weighted_glm <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_caret_train , method = "glm", weights = model_weights, metric = "ROC", trControl = ctrl)
+
+ctrl$sampling <- "down"
+
+ctrl$seeds <- orig_glm$control$seeds
+
+down_glm <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop,data=bo_caret_train, method = "glm", metric = "ROC", trControl = ctrl)
+
+ctrl$sampling <- "up"
+
+ctrl$seeds <- orig_glm$control$seeds
+
+up_glm <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop,data=bo_caret_train, method = "glm", metric = "ROC", trControl = ctrl)
+
+ctrl$sampling <- "smote"
+
+ctrl$seeds <- orig_glm$control$seeds
+
+smote_glm <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop,data=bo_caret_train, method = "glm", metric = "ROC", trControl = ctrl)
+```
+
+##Returned Logistic Models ROC
+
+This is the resulting AUC for the logistic models that were created.
+
+```{r logistic ROC}
+# Examine results for test set
+
+model_glm <- list(original = orig_glm,
+                   weighted = weighted_glm,
+                   down = down_glm,
+                   up = up_glm,
+                   SMOTE = smote_glm)
+
+model_glm_roc <- model_glm %>%
+  map(test_roc, data = bo_caret_test)
+
+model_glm_roc %>%
+  map(auc)
+```
+
+From these results shows that down sampling had the best AUC by a big margin, unlike the decision tree and random forest models that were created. 
+
+##Logistic ROC Plot
+
+The plots of the ROC of the logistic models created.
+
+```{r logistic ROC plot}
+results_glm_roc <- list(NA)
+num_mod <- 1
+
+for(the_roc in model_glm_roc){
+  
+  results_glm_roc[[num_mod]] <- 
+    data_frame(tpr = the_roc$sensitivities,
+               fpr = 1 - the_roc$specificities,
+               model = names(model_glm)[num_mod])
+  
+  num_mod <- num_mod + 1
+  
+}
+
+results_df_glm_roc <- bind_rows(results_glm_roc)
+
+custom_col <- c("#000000", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+roc_plot_glm <- ggplot(aes(x = fpr,  y = tpr, group = model), data = results_df_glm_roc) +
+  geom_line(aes(color = model), size = 1) +
+  scale_color_manual(values = custom_col) +
+  geom_abline(intercept = 0, slope = 1, color = "gray", size = 1) +
+  theme_bw(base_size = 18) + 
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("Logistic ROC Results", subtitle = NULL)
+
+roc_plot_glm
+```
+
+The ROC plot shows the same thing that the AUC list did, which was the striking differences between models in this example. In reviewing this plot, it is clear the best choice is the down sampled model.
+
+##Sample Down Logistic Model
+
+After it was shown that the sample down model was the best to use, I wanted to examine the variables to see if all the variables used in the logistic models were significant or if some varaibles should be removed the model.
+
+```{r logistic model summary}
+down_glm
+summary(down_glm)
+```
+
+From the results from the summary only 5 variables are significant which are national inventory, lead time, sales forecast for the next 3 months, sales for the past one month, and sales for the last 3 months. Knowing that these are the significant variables, a new model with only these variables can be created.
+
+##Sample Down Logistic Model Reduced
+
+After the results were examined, the reduced model with only 5 variables was created and examined and it was found that the model could be reduced even more to only 3 variables, this is the model produced.
+
+```{r logistic model reduced, message=FALSE, warning=FALSE}
+ctrl$sampling <- "down"
+
+down_glm2 <- train(went_on_backorder~national_inv+lead_time+forecast_3_month, data=bo_caret_train, method = "glm", metric = "ROC", trControl = ctrl)
+```
+
+##Sample Down Logistic Model Reduced Summary
+
+Summary of the newly created model.
+
+```{r logistic model reduced summary}
+summary(down_glm2)
+```
+
+The logistic model created shows that the only important variable are national inventory, lead time, and sales forecast for the next 3 months.
+
+##Both Sample Down Logistic Models ROC
+
+Now that there is two models, a full model and a reduced model, it is worth examining the difference between the ROC of the two models.
+
+```{r logistic ROC comparision}
+down_glm %>% test_roc(data = bo_caret_test) %>% auc()
+down_glm2 %>% test_roc(data = bo_caret_test) %>% auc()
+```
+
+In comparing the two logisitic models created, the reduced logistic model actually has a slightly better AUC. But I would still like to look at the difference in results between the two models.
+
+##Sample Down Logistic Model Confusion Matrix
+
+The confusion matrix for the logistic model selected.
+
+```{r logistic confusion martix}
+bo_actual_glm <- bo_caret_test$went_on_backorder 
+bo_predicted_glm <- predict(down_glm, bo_caret_test, type="raw") 
+bo_results_glm<- confusionMatrix(bo_predicted_glm, bo_actual_glm, positive="Yes") 
+print(bo_results_glm)
+```
+
+##Sample Down Logistic Model Reduced Confusion Matrix
+
+The confusion matrix for the reduced logistic model.
+
+```{r logistic reduced confusion martix}
+bo_actual_glm2 <- bo_caret_test$went_on_backorder 
+bo_predicted_glm2 <- predict(down_glm2, bo_caret_test, type="raw") 
+bo_results_glm2<- confusionMatrix(bo_predicted_glm2, bo_actual_glm2, positive="Yes") 
+print(bo_results_glm2)
+```
+
+In looking at the results, it is clear that the full model fits the results better in the confusion matrix. Both of these models do a great job in term of sensitivity, but they do not perform well with specificity, this becasue the model tends to over fit results into the positive class.
+
+#KNN
+
+The last modeling technique I wanted to try was KNN modeling to see if that could possible yeild better results.
+
+##Normalizing Training and Testing Sets
+
+For KNN all the numberic variables have to formatted the same, so I selected to normalize all the numberic variables so that KNN modeling can be done. Both the training and testing sets were normalized.
+
+```{r traing and test normalizatiom}
+bo_knn_train<-bo_caret_train
+bo_knn_train_prenormal<-bo_knn_train[,c(2:12,14:17)]
+normalize<- function(x){return((x-min(x))/(max(x)-min(x)))}
+bo_knn_train_norm<-as.data.frame(lapply(bo_knn_train_prenormal, normalize))
+#summary(bo_knn_train_norm)
+bo_knn_train_normal<-cbind(bo_knn_train[,c(1)],bo_knn_train_norm[,c(1:11)],bo_knn_train[,c(13)], bo_knn_train_norm [,c(12:15)],bo_knn_train[,c(18:23)])
+bo_knn_train_normal<-bo_knn_train_normal[complete.cases(bo_knn_train_normal),]
+
+names(bo_knn_train_normal)[1] <- "sku"
+names(bo_knn_train_normal)[13] <- "potential_issue"
+
+bo_knn_test<-bo_caret_test
+bo_knn_test_prenormal<-bo_knn_test[,c(2:12,14:17)]
+normalize<- function(x){return((x-min(x))/(max(x)-min(x)))}
+bo_knn_test_norm<-as.data.frame(lapply(bo_knn_test_prenormal, normalize))
+#summary(bo_knn_test_norm)
+bo_knn_test_normal<-cbind(bo_knn_test[,c(1)],bo_knn_test_norm[,c(1:11)], bo_knn_test[,c(13)], bo_knn_test_norm [,c(12:15)],bo_knn_test[,c(18:23)])
+bo_knn_test_normal<-bo_knn_test_normal[complete.cases(bo_knn_test_normal),]
+
+names(bo_knn_test_normal)[1] <- "sku"
+names(bo_knn_test_normal)[13] <- "potential_issue"
+```
+
+##KNN with Sampling
+
+The same five models were produced as was produced before, with the 10 fold validation, but the normalized training data was used to create the models.
+
+```{r KNN models, message=FALSE, warning=FALSE}
+ctrl <- trainControl(method = "cv",
+                     number = 10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+
+set.seed(123)
+
+orig_knn <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_knn_train_normal, method = "knn", metric = "ROC", trControl = ctrl, tuneLength = 10)
+
+model_weights <- ifelse(bo_knn_train_normal$went_on_backorder == "No",
+                        (1/table(bo_knn_train_normal$went_on_backorder)[1]) * 0.5,
+                        (1/table(bo_knn_train_normal$went_on_backorder)[2]) * 0.5)
+
+weighted_knn <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_knn_train_normal, method = "knn", weights = model_weights, metric = "ROC", trControl = ctrl, tuneLength = 10)
+
+ctrl$sampling <- "down"
+
+down_knn <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_knn_train_normal, method = "knn", metric = "ROC", trControl = ctrl, tuneLength = 10)
+
+ctrl$sampling <- "up"
+
+up_knn <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_knn_train_normal, method = "knn", metric = "ROC", trControl = ctrl, tuneLength = 10)
+
+ctrl$sampling <- "smote"
+
+smote_knn <- train(went_on_backorder~national_inv+lead_time+in_transit_qty+forecast_3_month+forecast_6_month+forecast_9_month+sales_1_month+sales_3_month+sales_6_month+sales_9_month+min_bank+potential_issue+pieces_past_due+perf_6_month_avg+perf_12_month_avg+local_bo_qty+deck_risk+oe_constraint+ppap_risk+stop_auto_buy+rev_stop, data=bo_knn_train_normal, method = "knn", metric = "ROC", trControl = ctrl, tuneLength = 10)
+```
+
+##Returned KNN Models ROC
+
+The AUC procuded by the five KNN models
+
+```{r KNN ROC}
+# Examine results for test set
+
+model_knn <- list(original = orig_knn,
+                   weighted = weighted_knn,
+                   down = down_knn,
+                   up = up_knn,
+                   SMOTE = smote_knn)
+
+model_knn_roc <- model_knn %>% map(test_roc, data = bo_knn_test_normal)
+
+model_knn_roc %>%
+  map(auc)
+```
+
+For the KNN models, the model with the best AUC score was the SMOTE model.
+
+##KNN ROC Plot
+
+The ROC plot for the five different KNN models produced
+
+```{r KNN ROC plot}
+results_knn_roc <- list(NA)
+num_mod <- 1
+
+for(the_roc in model_knn_roc){
+  
+  results_knn_roc[[num_mod]] <- 
+    data_frame(tpr = the_roc$sensitivities,
+               fpr = 1 - the_roc$specificities,
+               model = names(model_knn)[num_mod])
+  
+  num_mod <- num_mod + 1
+  
+}
+
+results_df_knn_roc <- bind_rows(results_knn_roc)
+
+custom_col <- c("#000000", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+roc_plot_knn <- ggplot(aes(x = fpr,  y = tpr, group = model), data = results_df_knn_roc) +
+  geom_line(aes(color = model), size = 1) +
+  scale_color_manual(values = custom_col) +
+  geom_abline(intercept = 0, slope = 1, color = "gray", size = 1) +
+  theme_bw(base_size = 18) + 
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("KNN ROC Results", subtitle = NULL)
+
+roc_plot_knn
+```
+
+In looking at the ploted ROC curves it hard to tell the difference between which model would preform better, but in knowing that the SMOTE has the best AUC I would recommend using it for a KNN model going forward. I think it is also worth noting how much the KNN models under perform most of the other models created.
+
+##KNN Confusion Matrix
+
+The confusion martix for the selected KNN model.
+
+```{r KNN confusion martix}
+bo_actual_knn <- bo_knn_test_normal$went_on_backorder 
+bo_predicted_knn <- predict(smote_knn, bo_knn_test_normal, type="raw") 
+bo_results_knn<- confusionMatrix(bo_predicted_knn, bo_actual_knn, positive="Yes") 
+print(bo_results_knn)
+```
+
+Now that this confusion matrix is created, I can go back and compare the results of all the confusion matrix and make a recommendation on which model to using going forward as the best to predict backorders. And the model that I would recommend is the random forest model. Through out the results, we are mostly looking at which model has the best sensitivity, that is not the only factor that went into making this decision. THe logistic models created had the best sensitivity of the models, but their over all accuracy was two low becasue of the overfitting of the positive class. So I decided to go with the random forst, because after the logistic models it has the best sensitivity, it has the best overall accuracy, and the best AUC score.
